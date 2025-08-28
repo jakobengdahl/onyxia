@@ -1,71 +1,66 @@
 #!/usr/bin/env bash
-
-# Improved install script for onyxia/web when apt repositories are unreliable.
-#
-# - Undviker att `apt-get update` orsakar fel genom att inte köra update.
-#   Försöker först installera nodejs och npm direkt från distributionen.
-#   Vid behov används NodeSource som fallback.
-# - Installerar Yarn Classic via corepack (om tillgängligt) eller npm.
-# - Ökar Yarn-nätverkstimeouten för att undvika ESOCKETTIMEDOUT.
-# - Navigerar till UI-projektet relativt till skriptets egen placering.
-# - Ger instruktioner för hur man startar utvecklingsservern via Onyxia-proxy.
-
 set -euo pipefail
 
-# Använd sudo om det finns, annars kör som root
+# Använd sudo om det finns
 if command -v sudo >/dev/null 2>&1; then
   SUDO="sudo"
 else
   SUDO=""
 fi
 
+# 1. Kommentera bort raden med ubuntugis-ppa (hindrar apt-get update från att avbryta)
+for file in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+  if [ -f "$file" ]; then
+    ${SUDO} sed -i.bak '/ubuntugis.*ppa/ s/^/#/' "$file" || true
+  fi
+done
+
 echo "[*] Checking for node ..."
 if ! command -v node >/dev/null 2>&1; then
   echo "[!] Node not found. Attempting to install via apt (nodejs + npm)."
-  # Försök installera nodejs och npm från distributionen utan apt-get update
+  # Försök installera nodejs och npm utan att köra update
   if ! ${SUDO} apt-get install -y --no-install-recommends nodejs npm 2>/dev/null; then
     echo "[!] Distro installation failed. Falling back to NodeSource (20.x)."
-    # Installera minimala beroenden för NodeSource
     ${SUDO} apt-get install -y --no-install-recommends ca-certificates curl gnupg
-    # Kör NodeSource-setup. Ignorera fel från tredjeparts-PPAs.
-    if curl -fsSL https://deb.nodesource.com/setup_20.x | ${SUDO} -E bash -; then
-      ${SUDO} apt-get install -y nodejs
-    else
-      echo "[ERROR] NodeSource setup failed due to repository errors."
-      exit 1
-    fi
+    # NodeSource-setup gör en apt-get update internt; nu lyckas den eftersom PPA är kommenterad
+    curl -fsSL https://deb.nodesource.com/setup_20.x | ${SUDO} -E bash -
+    ${SUDO} apt-get install -y nodejs
   fi
 else
   echo "[*] Node is already installed: $(node -v)"
 fi
 
-# Verifiera Node-installation
-if ! command -v node >/dev/null 2>&1; then
-  echo "[ERROR] Node installation was not successful."
-  exit 1
+# Kontrollera Node
+command -v node >/dev/null || { echo "[ERROR] Node installation failed."; exit 1; }
+
+# 2. Se till att npm finns
+if ! command -v npm >/dev/null; then
+  echo "[*] npm not found. Installing via apt…"
+  ${SUDO} apt-get install -y npm || {
+    echo "[ERROR] Npm installation failed. You may need to fix apt repositories or install NodeSource.";
+    exit 1;
+  }
 fi
 
 echo "[*] Setting up Yarn..."
 if command -v corepack >/dev/null 2>&1; then
-  # Aktivera corepack och förbered Yarn Classic (v1)
   ${SUDO} corepack enable
   ${SUDO} corepack prepare yarn@1.x --activate
 else
-  # Fallback: installera Yarn globalt via npm
   ${SUDO} npm install -g yarn
 fi
 
-# Sätt global Yarn-timeout (default 10 minuter)
+# Set network timeout
 YARN_TIMEOUT="${YARN_TIMEOUT:-600000}"
 yarn config set network-timeout "${YARN_TIMEOUT}" -g || true
 
-# Hitta skriptets katalog och navigera till UI-subprojektet relativt till denna
+# Navigera relativt till skriptets plats
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "${SCRIPT_DIR}/web"
 
-echo "[*] Installing npm dependencies with Yarn (timeout ${YARN_TIMEOUT} ms)..."
+echo "[*] Installing dependencies…"
 yarn install --network-timeout "${YARN_TIMEOUT}"
 
-echo "[+] Dependency installation completed successfully."
-echo "    To start the development server:"
-echo "     yarn dev --host $(hostname -I | awk '{print $1}') --port 3000"
+echo "[+] Done."
+echo "  Start dev-server with:"
+echo "  yarn dev --host $(hostname -I | awk '{print $1}') --port 3000"

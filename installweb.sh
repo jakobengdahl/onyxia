@@ -1,76 +1,71 @@
 #!/usr/bin/env bash
 
-# Robust installation script for Onyxia web UI (onyxia/web)
+# Improved install script for onyxia/web when apt repositories are unreliable.
 #
-# This script installs a modern Node.js runtime and Yarn package manager,
-# then runs `yarn install` for the UI project with a generous network timeout
-# to avoid `ESOCKETTIMEDOUT` errors. It uses corepack when available to
-# provide Yarn Classic (v1) because the project relies on it. If corepack
-# isn't available, it falls back to installing Yarn via npm.
+# - Undviker att `apt-get update` orsakar fel genom att inte köra update.
+#   Försöker först installera nodejs och npm direkt från distributionen.
+#   Vid behov används NodeSource som fallback.
+# - Installerar Yarn Classic via corepack (om tillgängligt) eller npm.
+# - Ökar Yarn-nätverkstimeouten för att undvika ESOCKETTIMEDOUT.
+# - Navigerar till UI-projektet relativt till skriptets egen placering.
+# - Ger instruktioner för hur man startar utvecklingsservern via Onyxia-proxy.
 
 set -euo pipefail
 
-# Pick sudo if present. On Onyxia pods, passwordless sudo is usually
-# available. Otherwise leave empty to run commands as the current user (root).
+# Använd sudo om det finns, annars kör som root
 if command -v sudo >/dev/null 2>&1; then
   SUDO="sudo"
 else
   SUDO=""
 fi
 
-# Update apt metadata quietly and install minimal tools for Node installation.
-# Do not pass -y to `apt-get update` because it isn't interactive; instead
-# use -y only with `install`. Avoid large recommends packages to keep
-# images lean.
-DEBIAN_FRONTEND=noninteractive ${SUDO} apt-get update -qq
-${SUDO} apt-get install -y --no-install-recommends ca-certificates curl gnupg
-
-# Install Node.js 20.x via NodeSource if Node isn't already installed.
-# If NodeSource fails (e.g. network restrictions), fall back to the distro's
-# nodejs/npm packages.
+echo "[*] Checking for node ..."
 if ! command -v node >/dev/null 2>&1; then
-  if curl -fsSL https://deb.nodesource.com/setup_20.x | ${SUDO} -E bash -; then
-    ${SUDO} apt-get install -y nodejs
-  else
-    echo "Warning: NodeSource repository could not be reached. Falling back to distro packages."
-    ${SUDO} apt-get install -y nodejs npm
+  echo "[!] Node not found. Attempting to install via apt (nodejs + npm)."
+  # Försök installera nodejs och npm från distributionen utan apt-get update
+  if ! ${SUDO} apt-get install -y --no-install-recommends nodejs npm 2>/dev/null; then
+    echo "[!] Distro installation failed. Falling back to NodeSource (20.x)."
+    # Installera minimala beroenden för NodeSource
+    ${SUDO} apt-get install -y --no-install-recommends ca-certificates curl gnupg
+    # Kör NodeSource-setup. Ignorera fel från tredjeparts-PPAs.
+    if curl -fsSL https://deb.nodesource.com/setup_20.x | ${SUDO} -E bash -; then
+      ${SUDO} apt-get install -y nodejs
+    else
+      echo "[ERROR] NodeSource setup failed due to repository errors."
+      exit 1
+    fi
   fi
+else
+  echo "[*] Node is already installed: $(node -v)"
 fi
 
-# Verify Node installation
+# Verifiera Node-installation
 if ! command -v node >/dev/null 2>&1; then
-  echo "Error: Node.js installation failed."
+  echo "[ERROR] Node installation was not successful."
   exit 1
 fi
-echo "Using Node $(node -v)"
 
-# Enable corepack and prepare Yarn Classic (1.x). Corepack is shipped with
-# Node 16+ and manages package managers such as Yarn and pnpm. Activating
-# Yarn via corepack ensures a deterministic, up-to-date installation.
+echo "[*] Setting up Yarn..."
 if command -v corepack >/dev/null 2>&1; then
+  # Aktivera corepack och förbered Yarn Classic (v1)
   ${SUDO} corepack enable
-  # Use Yarn Classic (1.x) because the onyxia/web project relies on the
-  # classic workflow. Adjust version if needed.
   ${SUDO} corepack prepare yarn@1.x --activate
 else
-  # Fall back to installing Yarn globally via npm
+  # Fallback: installera Yarn globalt via npm
   ${SUDO} npm install -g yarn
 fi
 
-# Increase Yarn network timeout to reduce ESOCKETTIMEDOUT errors.
-# YARN_TIMEOUT can be overridden by the caller; default is 10 minutes (600000 ms).
+# Sätt global Yarn-timeout (default 10 minuter)
 YARN_TIMEOUT="${YARN_TIMEOUT:-600000}"
 yarn config set network-timeout "${YARN_TIMEOUT}" -g || true
 
-# Navigate to project directory. Assumes this script lives in the repository root
-# and that the `onyxia/web` subdirectory contains the UI project.
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "${SCRIPT_DIR}/onyxia/web"
+# Hitta skriptets katalog och navigera till UI-subprojektet relativt till denna
+SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}/web"
 
-# Install dependencies. The explicit --network-timeout flag is passed
-# in case per-project configuration overrides the global setting. Yarn v1
-# accepts this flag; subsequent versions will ignore it gracefully.
+echo "[*] Installing npm dependencies with Yarn (timeout ${YARN_TIMEOUT} ms)..."
 yarn install --network-timeout "${YARN_TIMEOUT}"
 
-echo "Dependency installation complete. You can now run the development server with:"
-echo "    yarn dev --host 0.0.0.0 --port 3000"
+echo "[+] Dependency installation completed successfully."
+echo "    To start the development server:"
+echo "     yarn dev --host $(hostname -I | awk '{print $1}') --port 3000"
